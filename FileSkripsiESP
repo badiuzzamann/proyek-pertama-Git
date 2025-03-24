@@ -1,0 +1,707 @@
+#include <Firebase_ESP_Client.h>
+#include <Arduino.h>
+#include <WiFi.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <ESP32Servo.h>
+// #include <NTPClient.h>
+#include <WiFiUdp.h>
+
+#include <addons/TokenHelper.h>
+#include <addons/RTDBHelper.h>
+
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+
+#define TURBIDITY_PIN 33
+#define ONE_WIRE_BUS 2
+#define PIN_RELAY_1  27 // The ESP32 pin GPIO27 connected to the IN1 pin of relay module
+#define PIN_RELAY_2  26
+#define PIN_RELAY_3  25 // The ESP32 pin GPIO26 connected to the IN2 pin of relay module
+
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+#define API_KEY "AIzaSyAbBIkZKdUUZr-Nm5I1UAM991fiZOm37eY"
+#define DATABASE_URL "https://project-st-iot-default-rtdb.firebaseio.com/"
+
+const char *ssid = "Edu_Robotics";
+const char *pass = "labrobot21";
+int lastRequest = 0;
+
+// WiFiUDP ntpUDP;
+// NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200, 60000); // Offset 25200 detik untuk Waktu Indonesia Barat (WIB)
+
+TaskHandle_t sensorInputHandle;
+TaskHandle_t ledTaskHandle;
+TaskHandle_t firebaseSetHandle;
+TaskHandle_t ControllSetHandle;
+
+void setupWifi();
+void Temperature();
+void readPH();
+void ControllTemperature();
+// void Feeding();
+void ControlPH();
+void Turbidity();
+void ControlTurbidity();
+void getAllParam();
+void GetControlStatus();
+void sendAllParam();
+
+void SensorTask(void *parameter);
+void ledTask(void *parameter);
+void FirebaseSet(void *parameter);
+void TaskControll(void *parameter);
+ 
+void GetMaxPHValue();
+void GetMinPHValue();
+void GetTempValueMin();
+void GetTempValueMax();
+void GetTubidityValue();
+// void GetADC();
+
+
+void SendControlStatus();
+
+FirebaseData fbdo;
+FirebaseAuth auth;
+FirebaseConfig config;
+
+static const int phPin = 35;
+static const int servoPin = 13;
+
+volatile int turbidityValue;
+volatile int turbidityTemp;
+volatile int speed;
+volatile int maxADC = 2150;
+volatile float temparatureValue;
+unsigned long food;
+unsigned long Relay1 = 0;
+unsigned long Relay2 = 0;
+unsigned long Relay3 = 0;
+volatile int kirimdatastatus;
+
+String Rel1;
+String Rel2;
+String Rel3;
+String waktu;
+
+
+static const int motorpin1 = 18;
+static const int motorpin2 = 19;
+static const int motorspeed = 5;
+const int freq = 30000;
+const int pwmChannel = 0;
+const int resolution = 8;
+int dutyCycle = 200;
+
+volatile float Po = 0;
+volatile float PH_Step;
+volatile int nilai_analog_ph;
+volatile double tegangan_ph;
+
+volatile float ph7 = 2.5;
+volatile float ph4 = 3.1;
+
+volatile int tempTur;
+volatile int tempMaxTemp;
+volatile int tempMinTemp;
+volatile int tempMinPH;
+volatile int tempMaxPH;
+
+
+
+Servo servo1;
+
+void setup() {
+    // put your setup code here, to run once:
+    
+    Serial.begin(115200);
+
+    sensors.begin();
+
+    if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  vTaskDelay(2000);
+  display.clearDisplay();
+
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  // Display static text
+  display.println("Welcome!!!");
+  display.display();
+
+    pinMode(BUILTIN_LED, OUTPUT);
+    pinMode(PIN_RELAY_1, OUTPUT);
+    pinMode(PIN_RELAY_2, OUTPUT);
+    pinMode(PIN_RELAY_3, OUTPUT);
+    pinMode(motorpin1, OUTPUT);
+    pinMode(motorpin2, OUTPUT);
+    pinMode(motorspeed, OUTPUT);
+    pinMode(phPin, INPUT);
+    servo1.attach(servoPin);
+    ledcAttachChannel(motorspeed, freq, resolution, pwmChannel);
+
+    
+    // Memulai NTP Client
+    // timeClient.begin();
+    vTaskDelay(1000);
+
+    setupWifi();
+
+    ESP_LOGI("SETUP", "Create freertos task!");
+
+    // sendAllParam();
+
+    
+
+    // Create RTOS task
+    xTaskCreate(SensorTask, "Sensor Task", 2048, NULL, 1, &sensorInputHandle);
+    xTaskCreate(ledTask, "LED Task", 2048, NULL, 1, &ledTaskHandle);
+    xTaskCreate(FirebaseSet, "Firebase Task", 8192, NULL, 3, &firebaseSetHandle);
+    xTaskCreate(TaskControll, "Controll Task", 1024, NULL, 2, &ControllSetHandle);
+}
+
+void loop() {
+    // put your main code here, to run repeatedly:
+    if (millis() - lastRequest > 10000) {
+        if (WiFi.status() != WL_CONNECTED) {
+            setupWifi();
+        } else {
+            ESP_LOGI("WIFI", "WiFi is already connected...");
+        }
+
+        lastRequest = millis();
+    }
+}
+
+
+void SensorTask(void *parameter) {
+    // EventBits_t clientBits;
+    for (;;) {
+        Turbidity();
+        Temperature();
+        readPH();
+
+        // timeClient.update();
+        // waktu = timeClient.getFormattedTime();
+
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 10);
+        // Display static text
+        display.print("Temperature : ");
+        display.println(temparatureValue);
+        display.print("Acidity     : ");
+        display.println(Po);
+        display.print("Turbidity   : ");
+        display.print(turbidityValue);
+        display.println("%");
+        display.display();
+
+        vTaskDelay(2000);
+
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 10);
+        // Display static text
+        display.print("Max Temp : ");
+        display.println(tempMaxTemp);
+        display.print("Min Temp : ");
+        display.println(tempMinTemp);
+        display.print("Max Tur  : ");
+        display.print(tempTur);
+        display.println("%");
+        display.print("Max pH   : ");
+        display.println(tempMaxPH);
+        display.print("Min pH   : ");
+        display.println(tempMinPH);
+
+        display.display();
+
+        vTaskDelay(2000);
+
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 10);
+        // Display static text
+        display.print("Suhu Dingin : ");
+        display.print(Rel1);
+        display.print("  ");
+        display.println(Relay1);
+        display.print("Suhu Panas: ");
+        display.print(Rel2);
+        display.print("  ");
+        display.println(Relay2);
+        display.print("Sirkulasi  : ");
+        display.print(Rel3);
+        display.print("  ");
+        display.println(Relay3);
+        display.display();
+
+        UBaseType_t stackLeft = uxTaskGetStackHighWaterMark(NULL);
+        // Serial.print("Sisa stack Sensor: ");
+        // Serial.println(stackLeft);
+
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        
+    }
+}
+
+void ledTask(void *parameter) {
+    for (;;) {
+        if (WiFi.status() == WL_CONNECTED) {
+            digitalWrite(BUILTIN_LED, HIGH);
+            vTaskDelay(1000);
+            digitalWrite(BUILTIN_LED, LOW);
+            vTaskDelay(1000);
+        } else {
+            digitalWrite(BUILTIN_LED, HIGH);
+            vTaskDelay(200);
+            digitalWrite(BUILTIN_LED, LOW);
+            vTaskDelay(200);
+        }
+    }
+}
+
+void FirebaseSet(void *parameter) {
+  // UBaseType_t uxHighWaterMark;
+    for (;;) {
+        if(Firebase.ready()){
+
+          SendControlStatus();
+          // GetControlStatus();
+          // Feeding();
+          // FirebaseJson json;
+
+          // json.set("Temperature", temparatureValue);
+          // json.set("Turbidity", turbidityValue);
+          // json.set("Acidity", Po);
+
+          // if (Firebase.RTDB.setJSON(&fbdo, F("/devices/542262128/value"), &json)) {
+          //     Serial.println("All data Sensor sent successfully");
+          // } else {
+          //     Serial.println("Failed to send data");
+          // }
+        // kirimdatastatus = 1;
+        // int temp1;
+        // int temp2;
+        // int temp3;
+
+        // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Temperature"), temparatureValue);
+        // vTaskDelay(2000/ portTICK_PERIOD_MS);
+        // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Turbidity"), turbidityValue);
+        // vTaskDelay(2000/ portTICK_PERIOD_MS);
+        // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Acidity"), Po);
+        // vTaskDelay(2000/ portTICK_PERIOD_MS);
+
+        // Serial.println("Data Disimpan");
+
+        // if(temp1 != temparatureValue){
+        //   temp1 = temparatureValue;
+        //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Temperature"), temparatureValue);
+        //   Serial.println("Data Temperature Terkirim");
+        // }
+        // else{
+        //   temp1 = temp1;
+        //   Serial.println("Data Temperature Disimpan");
+        // }
+
+        // vTaskDelay(2000);
+
+        // if(temp2 != turbidityValue){
+        //   temp2 = turbidityValue;
+        //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Turbidity"), turbidityValue);
+        //   Serial.println("Data Turbidity Terkirim");
+        // }
+        // else{
+        //   temp2 = temp2;
+        //   Serial.println("Data Kekeruhan Disimpan");
+        // }
+
+        // vTaskDelay(2000);
+
+        // if(temp3 != Po){
+        //   temp3 = Po;
+        //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Acidity"), Po);
+        //   Serial.println("Data Acidity Terkirim");
+        // }
+        // else{
+        //   temp3 = temp3;
+        //   Serial.println("Data Acidity Disimpan");
+        // }
+
+        // vTaskDelay(2000);
+        
+        
+        } 
+        UBaseType_t stackLeft = uxTaskGetStackHighWaterMark(NULL);
+        // Serial.print("Sisa stack Firebase: ");
+        // Serial.println(stackLeft);
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        // vTaskDelay(1800000 / portTICK_PERIOD_MS);
+    }
+}
+
+void TaskControll(void *parameter){
+  for(;;){
+    ControllTemperature();
+    ControlTurbidity();
+    ControlPH();
+    ControlTurbidity();
+    UBaseType_t stackLeft = uxTaskGetStackHighWaterMark(NULL);
+    // Serial.print("Sisa stack kontrol: ");
+    // Serial.println(stackLeft);
+    vTaskDelay(1000/ portTICK_PERIOD_MS);
+  }
+}
+
+void setupWifi() {
+    vTaskDelay(10/ portTICK_PERIOD_MS);
+    // We start by connecting to a WiFi network
+    ESP_LOGI("WIFI", "Connecting to %s", ssid);
+ 
+    WiFi.begin(ssid, pass);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        vTaskDelay(500/ portTICK_PERIOD_MS);
+        Serial.print(".");
+        display.clearDisplay();
+        display.setTextSize(1);
+        display.setTextColor(WHITE);
+        display.setCursor(0, 10);
+        // Display static text
+        display.println("Connecting...");
+
+        display.display();
+    }
+
+    Serial.println("WiFi is connected!");
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 10);
+    // Display static text
+    display.println("Connected!");
+    display.display();
+
+    Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 10);
+        // Display static text
+    display.println("Connecting to Firebase...");
+    display.display();
+
+  /* Assign the api key (required) */
+    config.api_key = API_KEY;
+    config.database_url = DATABASE_URL;
+    auth.user.email = "ilhambadiuzzamann@gmail.com";
+    auth.user.password = "permatakopo2";
+    Firebase.reconnectNetwork(true);
+    Firebase.signUp(&config, &auth, "ilhambadiuzzamann@gmail.com", "permatakopo2");
+    config.token_status_callback = tokenStatusCallback;
+    Firebase.begin(&config, &auth);
+    Firebase.reconnectWiFi(true);
+    Firebase.setDoubleDigits(5);
+
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 10);
+        // Display static text
+    display.println("Connected to Firebase");
+    display.display();
+}
+
+
+void Temperature(){
+  sensors.requestTemperatures();
+  
+  if(temparatureValue != DEVICE_DISCONNECTED_C) 
+  {
+    // Serial.print("Nilai Suhu Cairan: ");
+    // Serial.println(temparatureValue);
+    temparatureValue = sensors.getTempCByIndex(0) + 1.0;
+  } 
+  else
+  {
+    temparatureValue = temparatureValue;
+    Serial.println("Error: Could not read temperature data");
+  }
+}
+
+void Turbidity(){
+  turbidityTemp = analogRead(TURBIDITY_PIN);
+  turbidityValue = map(turbidityTemp, 0, maxADC, 100, 0);
+  // Serial.print("Nilai Kekeruhan Cairan: ");
+  // Serial.println(turbidityValue);
+}
+
+void readPH(){
+  int nilai_analog_pH = analogRead(phPin);
+  // Serial.print("Nilai ADC pH: ");
+  // Serial.println("nilai_analog_pH");
+  tegangan_ph = 3.3 / 4095 * nilai_analog_pH;
+  // Serial.print("Tegangan pH: ");
+  // Serial.println(tegangan_ph, 3);
+
+  PH_Step = (ph4 - ph7) / 3;
+  Po = 7.00 + ((ph7 - tegangan_ph) / PH_Step) + 1.30;
+  // Serial.print("Nilai pH Cairan: ");
+  // Serial.println(Po, 2);
+
+
+}
+
+void ControllTemperature(){
+  if(temparatureValue > tempMaxTemp){
+    digitalWrite(PIN_RELAY_1, HIGH);
+    Relay1 = 1;
+    digitalWrite(PIN_RELAY_2, LOW);
+    Relay2 = 0;
+    Rel2 = "LOW";
+    // Serial.println("Relay Temperature Dingin On");
+  }else if(temparatureValue < tempMinTemp){
+    digitalWrite(PIN_RELAY_2, HIGH);
+    Relay2 = 1;
+    digitalWrite(PIN_RELAY_1, LOW);
+    Relay1 = 0;
+    Rel1 = "LOW";
+    // Serial.println("Relay Temperature Panas On");
+  }else{
+    digitalWrite(PIN_RELAY_1, LOW);
+    // Serial.println("Relay Temperature Dingin Off");
+    digitalWrite(PIN_RELAY_2, LOW);
+    // Serial.println("Relay Temperature Panas Off");
+    Rel1 = "LOW";
+    Rel2 = "LOW";
+    Relay1 = 0;
+    Relay2 = 0;
+  }
+}
+
+void ControlTurbidity(){
+  digitalWrite(motorpin1, LOW);
+  digitalWrite(motorpin2, HIGH); 
+  speed = map(turbidityValue, 0, tempTur, 200, 255);
+  ledcWrite(motorspeed, speed);
+}
+
+void ControlPH(){
+  if(Po >= tempMinPH && Po <= tempMaxPH){
+    digitalWrite(PIN_RELAY_3, LOW);
+    Relay3 = 0;
+    Rel3 = "LOW";
+    // Serial.println("Relay PH Off");
+  }else{
+    digitalWrite(PIN_RELAY_3, HIGH);
+    Relay3 = 1;
+    Rel3 = "HIGH";
+    // Serial.println("Relay PH ON");
+  }
+}
+
+// void Feeding(){
+   
+//   }
+   
+// }
+
+void sendAllParam(){
+  FirebaseJson json;
+    json.set("MaxTemp", tempMaxTemp);
+    json.set("Turbi", tempTur);
+    json.set("MinTemp", tempMinTemp);
+    json.set("MinPh", tempMinPH);
+    json.set("MaxPh", tempMaxPH);
+
+  if (Firebase.RTDB.setJSON(&fbdo, F("/devices/542262128/value"), &json)) {
+              Serial.println("All parameter sent successfully");
+          } else {
+              Serial.println("Failed to send data");
+          }
+
+}
+void GetTubidityValue(){
+    if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/Turbi"))){
+      if(fbdo.dataType() = "int"){
+        tempTur = fbdo.intData();
+        Serial.print("Get Nilai Turbidity Max : ");
+        Serial.println(tempTur);
+    }
+  }
+}
+
+void GetTempValueMax(){
+    if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/MaxTemp"))){
+      if(fbdo.dataType() = "int"){
+        tempMaxTemp = fbdo.intData();
+        Serial.print("Get Nilai Temperature Max : ");
+        Serial.println(tempMaxTemp);
+    }
+  }
+}
+
+void GetTempValueMin(){
+    if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/MinTemp"))){
+      if(fbdo.dataType() = "int"){
+        tempMinTemp = fbdo.intData();
+        Serial.print("Get Nilai Temperature Min : ");
+        Serial.println(tempMinTemp);
+    }
+  }
+}
+
+void GetMinPHValue(){
+    if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/MinPh"))){
+      if(fbdo.dataType() = "int"){
+        tempMinPH = fbdo.intData();
+        Serial.print("Get Nilai PH Min : ");
+        Serial.println(tempMinPH);
+    }
+  }
+}
+
+void GetMaxPHValue(){
+    if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/MaxPh"))){
+      if(fbdo.dataType() = "int"){
+        tempMaxPH = fbdo.intData();
+        Serial.print("Get Nilai PH Max : ");
+        Serial.println(tempMaxPH);
+    }
+  }
+}
+
+// void GetADC(){
+//     if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/maxADC"))){
+//       if(fbdo.dataType() = "int"){
+//         maxADC = fbdo.intData();
+//         Serial.print("Get Nilai ADC : ");
+//         Serial.println(maxADC);
+//     }
+//   }
+// }
+
+void getAllParam(){
+  GetMaxPHValue();
+  GetMinPHValue();
+  GetTempValueMin();
+  GetTempValueMax();
+  GetTubidityValue();
+  // GetADC();
+}
+
+void SendControlStatus(){
+
+  getAllParam();
+
+  FirebaseJson json;
+          json.set("Temperature", temparatureValue);
+          json.set("Turbidity", turbidityValue);
+          json.set("Acidity", Po);
+          json.set("Relay1", Relay1);
+          json.set("Relay2", Relay2);
+          json.set("Relay3", Relay3);
+          json.set("Filter", speed);
+          json.set("MaxTemp", tempMaxTemp);
+          json.set("Turbi", tempTur);
+          json.set("MinTemp", tempMinTemp);
+          json.set("MinPh", tempMinPH);
+          json.set("MaxPh", tempMaxPH);
+          // json.set("maxADC", maxADC);
+   
+
+          if (Firebase.RTDB.setJSON(&fbdo, F("/devices/542262128/value"), &json)) {
+              Serial.println("All data sent successfully");
+          } else {
+              Serial.println("Failed to send data");
+          }
+  
+
+          // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay1"), Relay1);
+  // vTaskDelay(2000/ portTICK_PERIOD_MS);
+  // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay2"), Relay2);
+  // vTaskDelay(2000/ portTICK_PERIOD_MS);
+  // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay3"), Relay3);
+  // vTaskDelay(2000/ portTICK_PERIOD_MS);
+  // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Filter"), speed);
+  // vTaskDelay(2000/ portTICK_PERIOD_MS);
+  // Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/ADC"), turbidityTemp);
+  // vTaskDelay(2000/ portTICK_PERIOD_MS);
+  // unsigned long temp1;
+  // unsigned long temp2;
+  // unsigned long temp3;
+
+  // if(temp1 != Relay1){
+  //   temp1 = Relay1;
+  //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay1"), Relay1);
+  // }
+  // else{
+    
+  //   temp1 = temp1;
+  // }
+
+  // if(temp2 != Relay2){
+  //   temp2 = Relay2;
+  //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay2"), Relay2);
+  // }
+  // else{
+  //   temp2 = temp2;
+  // }
+
+  // if(temp3 != Relay3){
+  //   temp3 = Relay1;
+  //   Firebase.RTDB.setFloat(&fbdo, F("/devices/542262128/value/Relay3"), Relay3);
+  // }
+  // else{
+  //   temp3 = temp3;
+  // }
+}
+
+void GetControlStatus(){
+  if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/Relay1"))){
+      if(fbdo.dataType() = "int"){
+      Relay1 = fbdo.intData();
+      if(Relay1 == 1){
+        Rel1 = "HIGH";
+      }else{
+        Rel1 = "LOW";
+      }
+    }
+  }
+  if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/Relay2"))){
+      if(fbdo.dataType() = "int"){
+      Relay2 = fbdo.intData();
+      if(Relay2 == 1){
+        Rel2 = "HIGH";
+      }else{
+        Rel2 = "LOW";
+      }
+    }
+  }
+  if(Firebase.RTDB.getInt(&fbdo, F("/devices/542262128/value/Relay3"))){
+      if(fbdo.dataType() = "int"){
+      Relay3 = fbdo.intData();
+      if(Relay3 == 1){
+        Rel3 = "HIGH";
+      }else{
+        Rel3 = "LOW";
+      }
+    }
+  }
+}
